@@ -132,9 +132,9 @@ class ApexTFLiteEngine(private val context: Context) {
                 useNNAPI = true  // Dùng NNAPI nếu có NPU
             }
             interpreter = Interpreter(modelBuffer, options)
-            Log.i(TAG, "TFLite model loaded successfully")
+            Log.i(TAG, "✅ TFLite model loaded successfully")
         } catch (e: Exception) {
-            Log.w(TAG, "TFLite model not found, using rule-based fallback: ${e.message}")
+            Log.w(TAG, "⚠ TFLite model not found, using rule-based fallback: ${e.message}")
             // Graceful fallback — tiếp tục với rule-based detection
         }
     }
@@ -175,7 +175,13 @@ class ApexTFLiteEngine(private val context: Context) {
         }
     }
 
-    fun close() { interpreter?.close() }
+    fun close() { 
+        try {
+            interpreter?.close() 
+        } catch (e: Exception) {
+            Log.e(TAG, "Error closing interpreter: ${e.message}")
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════
@@ -193,24 +199,35 @@ class LogcatMonitor(
         monitorJob?.cancel()
         monitorJob = scope.launch(Dispatchers.IO) {
             Log.i(TAG, "LogcatMonitor started")
-            try {
-                // Dùng logcat với filter để giảm noise
-                val process = Runtime.getRuntime().exec(
-                    arrayOf("logcat", "-v", "brief", "-T", "1",
-                        "ActivityManager:W", "PackageManager:W",
-                        "WindowManager:W", "InputMethodManager:W",
-                        "*:E")
-                )
-                val reader = BufferedReader(InputStreamReader(process.inputStream))
-                var line: String?
-                while (isActive && reader.readLine().also { line = it } != null) {
-                    line?.let { analyzeLine(it) }
+            var retryCount = 0
+            val maxRetries = 3
+            
+            while (isActive && retryCount < maxRetries) {
+                try {
+                    // Dùng logcat với filter để giảm noise
+                    val process = Runtime.getRuntime().exec(
+                        arrayOf("logcat", "-v", "brief", "-T", "1",
+                            "ActivityManager:W", "PackageManager:W",
+                            "WindowManager:W", "InputMethodManager:W",
+                            "*:E")
+                    )
+                    val reader = BufferedReader(InputStreamReader(process.inputStream))
+                    retryCount = 0  // Reset retry counter on success
+                    
+                    var line: String?
+                    while (isActive && reader.readLine().also { line = it } != null) {
+                        line?.let { analyzeLine(it) }
+                    }
+                } catch (e: Exception) {
+                    retryCount++
+                    Log.e(TAG, "LogcatMonitor error (attempt $retryCount/$maxRetries): ${e.message}")
+                    if (retryCount < maxRetries) {
+                        delay(5_000)
+                    } else {
+                        Log.w(TAG, "LogcatMonitor max retries exceeded, falling back to rule-based detection only")
+                        break
+                    }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "LogcatMonitor error: ${e.message}")
-                // Retry sau 5 giây
-                delay(5_000)
-                if (isActive) start(scope)
             }
         }
     }
@@ -218,37 +235,41 @@ class LogcatMonitor(
     fun stop() { monitorJob?.cancel() }
 
     private fun analyzeLine(line: String) {
-        // BƯỚC 1: Rule-based quick scan (O(n) với n = số patterns)
-        for (sig in ThreatSignatures.LOGCAT_SIGNATURES) {
-            if (sig.pattern.containsMatchIn(line)) {
-                val pkg = extractPackageName(line)
-                val pid = extractPid(line)
-                onThreatDetected(ThreatEvent(
-                    packageName  = pkg,
-                    pid          = pid,
-                    category     = sig.category,
-                    severity     = sig.severity,
-                    description  = sig.description,
-                    rawLogLine   = line.take(256)
-                ))
-                return  // Không cần TFLite nếu rule đã match
+        try {
+            // BƯỚC 1: Rule-based quick scan (O(n) với n = số patterns)
+            for (sig in ThreatSignatures.LOGCAT_SIGNATURES) {
+                if (sig.pattern.containsMatchIn(line)) {
+                    val pkg = extractPackageName(line)
+                    val pid = extractPid(line)
+                    onThreatDetected(ThreatEvent(
+                        packageName  = pkg,
+                        pid          = pid,
+                        category     = sig.category,
+                        severity     = sig.severity,
+                        description  = sig.description,
+                        rawLogLine   = line.take(256)
+                    ))
+                    return  // Không cần TFLite nếu rule đã match
+                }
             }
-        }
 
-        // BƯỚC 2: TFLite cho log dài/phức tạp không match rule
-        if (line.length > 50) {
-            val classifications = tfEngine.classify(line)
-            classifications.forEach { (cat, conf) ->
-                val pkg = extractPackageName(line)
-                onThreatDetected(ThreatEvent(
-                    packageName  = pkg,
-                    pid          = extractPid(line),
-                    category     = cat,
-                    severity     = if (conf > 0.9f) ThreatSeverity.HIGH else ThreatSeverity.MEDIUM,
-                    description  = "[AI] ${cat.name} detected (confidence: ${"%.1f".format(conf * 100)}%)",
-                    rawLogLine   = line.take(256)
-                ))
+            // BƯỚC 2: TFLite cho log dài/phức tạp không match rule
+            if (line.length > 50) {
+                val classifications = tfEngine.classify(line)
+                classifications.forEach { (cat, conf) ->
+                    val pkg = extractPackageName(line)
+                    onThreatDetected(ThreatEvent(
+                        packageName  = pkg,
+                        pid          = extractPid(line),
+                        category     = cat,
+                        severity     = if (conf > 0.9f) ThreatSeverity.HIGH else ThreatSeverity.MEDIUM,
+                        description  = "[AI] ${cat.name} detected (confidence: ${"%.1f".format(conf * 100)}%)",
+                        rawLogLine   = line.take(256)
+                    ))
+                }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error analyzing line: ${e.message}")
         }
     }
 
@@ -279,23 +300,31 @@ class ProcessWatcher(
     )
 
     suspend fun scanProcesses() = withContext(Dispatchers.IO) {
-        val output = shizukuExecute("dumpsys activity processes | grep -E 'ProcessRecord|adj='")
-        parseProcessOutput(output)
+        try {
+            val output = shizukuExecute("dumpsys activity processes | grep -E 'ProcessRecord|adj='")
+            parseProcessOutput(output)
+        } catch (e: Exception) {
+            Log.e(TAG, "ProcessWatcher error: ${e.message}")
+        }
     }
 
     private fun parseProcessOutput(output: String) {
-        output.lines().forEach { line ->
-            knownSuspiciousApps.forEach { suspicious ->
-                if (line.contains(suspicious)) {
-                    onSuspiciousProcess(ThreatEvent(
-                        packageName = suspicious,
-                        pid         = -1,
-                        category    = ThreatCategory.SPYWARE,
-                        severity    = ThreatSeverity.HIGH,
-                        description = "App độc hại đã biết đang chạy: $suspicious"
-                    ))
+        try {
+            output.lines().forEach { line ->
+                knownSuspiciousApps.forEach { suspicious ->
+                    if (line.contains(suspicious)) {
+                        onSuspiciousProcess(ThreatEvent(
+                            packageName = suspicious,
+                            pid         = -1,
+                            category    = ThreatCategory.SPYWARE,
+                            severity    = ThreatSeverity.HIGH,
+                            description = "App độc hại đã biết đang chạy: $suspicious"
+                        ))
+                    }
                 }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing process output: ${e.message}")
         }
     }
 }
@@ -310,25 +339,29 @@ class PermissionAuditor(
 ) {
     suspend fun auditDangerousPermissions(): List<ThreatEvent> = withContext(Dispatchers.IO) {
         val threats = mutableListOf<ThreatEvent>()
-        val output = shizukuExecute(
-            "pm list packages -3 | sed 's/package://g' | " +
-            "xargs -I{} sh -c 'pm dump {} | grep -E \"(granted=true|BIND_ACCESSIBILITY)\" | " +
-            "head -5 | sed \"s/^/{}: /\"'"
-        )
-        // Parse và filter các permission nguy hiểm
-        ThreatSignatures.DANGEROUS_PERM_PATTERNS.forEach { (perm, severity) ->
-            if (output.contains(perm)) {
-                val pkg = extractPackageFromPermLine(output, perm)
-                if (pkg.isNotBlank() && !isSystemApp(pkg)) {
-                    threats.add(ThreatEvent(
-                        packageName = pkg,
-                        pid         = -1,
-                        category    = ThreatCategory.SPYWARE,
-                        severity    = severity,
-                        description = "App đang dùng quyền nguy hiểm: $perm"
-                    ))
+        try {
+            val output = shizukuExecute(
+                "pm list packages -3 | sed 's/package://g' | " +
+                "xargs -I{} sh -c 'pm dump {} | grep -E \"(granted=true|BIND_ACCESSIBILITY)\" | " +
+                "head -5 | sed \"s/^/{}: /\"'"
+            )
+            // Parse và filter các permission nguy hiểm
+            ThreatSignatures.DANGEROUS_PERM_PATTERNS.forEach { (perm, severity) ->
+                if (output.contains(perm)) {
+                    val pkg = extractPackageFromPermLine(output, perm)
+                    if (pkg.isNotBlank() && !isSystemApp(pkg)) {
+                        threats.add(ThreatEvent(
+                            packageName = pkg,
+                            pid         = -1,
+                            category    = ThreatCategory.SPYWARE,
+                            severity    = severity,
+                            description = "App đang dùng quyền nguy hiểm: $perm"
+                        ))
+                    }
                 }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "PermissionAuditor error: ${e.message}")
         }
         threats
     }
@@ -377,10 +410,10 @@ class ThreatResponseEngine(
             }
             // Force-stop toàn bộ processes của package
             shizukuExecute("am force-stop $packageName")
-            Log.i(TAG, "Successfully stopped: $packageName (pid=$pid)")
+            Log.i(TAG, "✅ Successfully stopped: $packageName (pid=$pid)")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to kill $packageName: ${e.message}")
+            Log.e(TAG, "❌ Failed to kill $packageName: ${e.message}")
             false
         }
     }
@@ -427,60 +460,86 @@ class UniversalApexDefense(
 
     /** Khởi động toàn bộ hệ thống giám sát */
     fun startMonitoring() {
-        _isScanning.value = true
-        logcatMonitor.start(scope)
-        scope.launch {
-            // Quét định kỳ mỗi 30 giây
-            while (isActive) {
-                processWatcher.scanProcesses()
-                val permThreats = permAuditor.auditDangerousPermissions()
-                permThreats.forEach { onThreatDetected(it) }
-                delay(30_000)
+        try {
+            _isScanning.value = true
+            logcatMonitor.start(scope)
+            scope.launch {
+                // Quét định kỳ mỗi 30 giây
+                while (isActive) {
+                    try {
+                        processWatcher.scanProcesses()
+                        val permThreats = permAuditor.auditDangerousPermissions()
+                        permThreats.forEach { onThreatDetected(it) }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error in monitoring loop: ${e.message}")
+                    }
+                    delay(30_000)
+                }
             }
+            Log.i(TAG, "✅ UniversalApexDefense monitoring started")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to start monitoring: ${e.message}")
+            _isScanning.value = false
         }
-        Log.i(TAG, "UniversalApexDefense monitoring started")
     }
 
     fun stopMonitoring() {
-        logcatMonitor.stop()
-        scope.coroutineContext.cancelChildren()
-        _isScanning.value = false
+        try {
+            logcatMonitor.stop()
+            scope.coroutineContext.cancelChildren()
+            _isScanning.value = false
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping monitoring: ${e.message}")
+        }
     }
 
     /** Quét nhanh theo yêu cầu */
     suspend fun runFullScan(): List<ThreatEvent> = withContext(Dispatchers.IO) {
-        val found = mutableListOf<ThreatEvent>()
-        found += permAuditor.auditDangerousPermissions()
-        processWatcher.scanProcesses()
-        found
+        try {
+            val found = mutableListOf<ThreatEvent>()
+            found += permAuditor.auditDangerousPermissions()
+            processWatcher.scanProcesses()
+            found
+        } catch (e: Exception) {
+            Log.e(TAG, "Full scan error: ${e.message}")
+            emptyList()
+        }
     }
 
     fun killThreat(threat: ThreatEvent) {
         scope.launch(Dispatchers.IO) {
-            val success = responseEngine.killApp(threat.packageName, threat.pid)
-            if (success) {
-                _threats.value = _threats.value.map {
-                    if (it.id == threat.id) it.copy(resolved = true) else it
+            try {
+                val success = responseEngine.killApp(threat.packageName, threat.pid)
+                if (success) {
+                    _threats.value = _threats.value.map {
+                        if (it.id == threat.id) it.copy(resolved = true) else it
+                    }
+                    recalcThreatLevel()
                 }
-                recalcThreatLevel()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error killing threat: ${e.message}")
             }
         }
     }
 
     private fun onThreatDetected(threat: ThreatEvent) {
-        // Deduplicate: không thêm nếu cùng package + category trong vòng 60s
-        val existing = _threats.value
-        val duplicate = existing.any {
-            it.packageName == threat.packageName &&
-            it.category == threat.category &&
-            !it.resolved &&
-            (System.currentTimeMillis() - it.timestamp) < 60_000
-        }
-        if (!duplicate) {
-            _threats.value = listOf(threat) + existing.take(49) // Max 50 threats
-            recalcThreatLevel()
-            responseEngine.respond(threat)
-            Log.w(TAG, "THREAT: [${threat.severity}] ${threat.packageName} — ${threat.description}")
+        try {
+            // Deduplicate: không thêm nếu cùng package + category trong vòng 60s
+            val existing = _threats.value
+            val duplicate = existing.any {
+                it.packageName == threat.packageName &&
+                it.category == threat.category &&
+                !it.resolved &&
+                (System.currentTimeMillis() - it.timestamp) < 60_000
+            }
+            if (!duplicate) {
+                _threats.value = listOf(threat) + existing.take(49) // Max 50 threats
+                recalcThreatLevel()
+                responseEngine.respond(threat)
+                Log.w(TAG, "THREAT: [${threat.severity}] ${threat.packageName} — ${threat.description}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error detecting threat: ${e.message}")
         }
     }
 
@@ -497,8 +556,12 @@ class UniversalApexDefense(
     }
 
     fun destroy() {
-        stopMonitoring()
-        engine.close()
-        scope.cancel()
+        try {
+            stopMonitoring()
+            engine.close()
+            scope.cancel()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error destroying defense engine: ${e.message}")
+        }
     }
 }
