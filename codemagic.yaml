@@ -1,15 +1,13 @@
 workflows:
   android-native-build:
-    name: Android Native (Java/Kotlin/C++) Build
+    name: Android Native Build
     environment:
       android_sdk: default
       java: 17
     scripts:
-      - name: Cấp quyền thực thi cho Gradle
-        script: |
-          chmod +x gradlew
       - name: Build file APK (Debug)
         script: |
-          ./gradlew assembleDebug
+          gradle assembleDebug
     artifacts:
       - app/build/outputs/apk/**/*.apk
+      
