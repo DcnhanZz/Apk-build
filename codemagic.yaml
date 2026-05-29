@@ -5,39 +5,86 @@ workflows:
     instance_type: mac_mini_m2
 
     environment:
-      java: "17"                    # String, không phải số
-      # Android SDK được pre-install sẵn trên Codemagic — không cần khai báo
+      java: "17"
       vars:
         GRADLE_OPTS: "-Xmx4g -Dorg.gradle.daemon=false"
 
     scripts:
-      # Bước 1: Cài NDK (bắt buộc cho project có C++/JNI)
-      - name: Install Android NDK
+      # ─── Bước 1: Debug — In ra cấu trúc SDK để biết path thực ───
+      - name: Debug SDK paths
         script: |
-          echo "y" | sdkmanager \
+          echo "=== SDK ROOT ==="
+          echo "$ANDROID_SDK_ROOT"
+          echo "=== cmdline-tools versions ==="
+          ls "$ANDROID_SDK_ROOT/cmdline-tools/" 2>/dev/null || echo "Không tìm thấy cmdline-tools"
+          echo "=== NDK đã cài sẵn ==="
+          ls "$ANDROID_SDK_ROOT/ndk/" 2>/dev/null || echo "Chưa có NDK"
+          echo "=== PATH hiện tại ==="
+          echo "$PATH"
+
+      # ─── Bước 2: Cài NDK — Dùng đường dẫn đầy đủ, không dựa vào PATH ───
+      - name: Install Android NDK & CMake
+        script: |
+          # Tìm sdkmanager với đường dẫn đầy đủ
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+          # Nếu không có 'latest', thử tìm version khác
+          if [ ! -f "$SDKMANAGER" ]; then
+            echo "'latest' không có, tìm version khác..."
+            SDKMANAGER=$(find "$ANDROID_SDK_ROOT/cmdline-tools" \
+              -name "sdkmanager" -type f 2>/dev/null | head -1)
+          fi
+
+          # Nếu vẫn không tìm thấy, quét toàn bộ SDK root
+          if [ ! -f "$SDKMANAGER" ]; then
+            echo "Quét toàn bộ SDK root..."
+            SDKMANAGER=$(find "$ANDROID_SDK_ROOT" \
+              -name "sdkmanager" -type f 2>/dev/null | head -1)
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "CRITICAL: sdkmanager không tìm thấy!"
+            echo "Nội dung SDK root:"
+            ls -la "$ANDROID_SDK_ROOT/"
+            exit 1
+          fi
+
+          echo "✅ sdkmanager tìm thấy tại: $SDKMANAGER"
+
+          # Accept licenses và cài đặt
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          yes | "$SDKMANAGER" \
             "ndk;25.2.9519653" \
             "cmake;3.22.1" \
-            --sdk_root=$ANDROID_SDK_ROOT
+            --sdk_root="$ANDROID_SDK_ROOT"
 
-      # Bước 2: Cấp quyền thực thi cho Gradle wrapper
+          # Lưu NDK path vào env để các bước sau dùng
+          NDK_PATH="$ANDROID_SDK_ROOT/ndk/25.2.9519653"
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> $CM_ENV
+          echo "NDK_HOME=$NDK_PATH" >> $CM_ENV
+          echo "✅ NDK installed: $NDK_PATH"
+
+      # ─── Bước 3: Cấp quyền gradlew ───────────────────────────
       - name: Set gradlew permissions
         script: chmod +x gradlew
 
-      # Bước 3: Kiểm tra môi trường
-      - name: Check environment
+      # ─── Bước 4: Kiểm tra môi trường build ───────────────────
+      - name: Verify build environment
         script: |
           echo "Java: $(java -version 2>&1 | head -1)"
+          echo "Gradle: $(./gradlew --version | grep Gradle)"
           echo "NDK: $ANDROID_NDK_HOME"
           echo "SDK: $ANDROID_SDK_ROOT"
-          ./gradlew --version
+          # Kiểm tra file CMakeLists.txt
+          find . -name "CMakeLists.txt" | head -5
 
-      # Bước 4: Build APK Debug
+      # ─── Bước 5: Build APK ───────────────────────────────────
       - name: Build APK Debug
-        script: ./gradlew assembleDebug --stacktrace
+        script: ./gradlew assembleDebug --stacktrace --info 2>&1 | tail -100
 
     artifacts:
       - app/build/outputs/apk/debug/*.apk
-      - app/build/outputs/logs/*.txt
+      - app/build/outputs/logs/**
 
     publishing:
       email:
