@@ -91,7 +91,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             launch { pollSystemStats() }
             launch { checkShizukuStatus() }
         }
-        defense.startMonitoring()
+        try {
+            defense.startMonitoring()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start defense monitoring: ${e.message}")
+        }
     }
 
     private suspend fun initHardwareProfile() = withContext(Dispatchers.IO) {
@@ -107,22 +111,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun checkShizukuStatus() {
-        _shizukuReady.value = ShizukuManager.isAvailable() &&
-                              ShizukuManager.checkPermission(app)
+        try {
+            _shizukuReady.value = ShizukuManager.isAvailable() &&
+                                  ShizukuManager.checkPermission(app)
+        } catch (e: Exception) {
+            Log.e(TAG, "Shizuku status check error: ${e.message}")
+            _shizukuReady.value = false
+        }
     }
 
     // ─── System Stats Polling ────────────────────────────────
     private suspend fun pollSystemStats() {
         while (true) {
-            withContext(Dispatchers.IO) {
-                _systemStats.value = SystemStats(
-                    cpuUsage    = readCpuUsagePct(),
-                    ramUsedMB   = readRamUsedMB(),
-                    ramTotalMB  = _hardwareProfile.value.ramTotalMB,
-                    tempCelsius = readCpuTempCelsius(),
-                    batteryPct  = readBatteryPct(),
-                    isCharging  = readIsCharging()
-                )
+            try {
+                withContext(Dispatchers.IO) {
+                    _systemStats.value = SystemStats(
+                        cpuUsage    = readCpuUsagePct(),
+                        ramUsedMB   = readRamUsedMB(),
+                        ramTotalMB  = _hardwareProfile.value.ramTotalMB,
+                        tempCelsius = readCpuTempCelsius(),
+                        batteryPct  = readBatteryPct(),
+                        isCharging  = readIsCharging()
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error polling system stats: ${e.message}")
             }
             delay(2_000)
         }
@@ -180,136 +193,214 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ─── Optimizer Actions ────────────────────────────────────
     fun triggerGamingMode() {
         viewModelScope.launch {
-            val result = optimizer.applyGamingMode()
-            result.onSuccess {
-                _optimizerState.value = _optimizerState.value.copy(
-                    gamingGovernor      = true,
-                    suspendOemThrottler = true,
-                    adaptiveLmk         = true,
-                    bgFreeze            = true
-                )
-                Log.i(TAG, "Gaming mode activated:\n$it")
-            }.onFailure { Log.e(TAG, "Gaming mode failed: ${it.message}") }
+            try {
+                val result = optimizer.applyGamingMode()
+                result.onSuccess {
+                    _optimizerState.value = _optimizerState.value.copy(
+                        gamingGovernor      = true,
+                        suspendOemThrottler = true,
+                        adaptiveLmk         = true,
+                        bgFreeze            = true
+                    )
+                    Log.i(TAG, "Gaming mode activated:\n$it")
+                }.onFailure { Log.e(TAG, "Gaming mode failed: ${it.message}") }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error triggering gaming mode: ${e.message}")
+            }
         }
     }
 
     fun setGamingGovernor(enabled: Boolean) = viewModelScope.launch(Dispatchers.IO) {
-        shizukuExec(hardwareDetector.getGovernorCommand(enabled))
-        _optimizerState.value = _optimizerState.value.copy(gamingGovernor = enabled)
+        try {
+            shizukuExec(hardwareDetector.getGovernorCommand(enabled))
+            _optimizerState.value = _optimizerState.value.copy(gamingGovernor = enabled)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting gaming governor: ${e.message}")
+        }
     }
 
     fun setThermalOverride(enabled: Boolean) = viewModelScope.launch(Dispatchers.IO) {
-        // Chỉ điều chỉnh trip point — không tắt hoàn toàn thermal protection
-        val cmd = if (enabled)
-            "echo 85000 > /sys/class/thermal/thermal_zone0/trip_point_0_temp 2>/dev/null || true"
-        else
-            "echo 75000 > /sys/class/thermal/thermal_zone0/trip_point_0_temp 2>/dev/null || true"
-        shizukuExec(cmd)
-        _optimizerState.value = _optimizerState.value.copy(thermalOverride = enabled)
+        try {
+            // Chỉ điều chỉnh trip point — không tắt hoàn toàn thermal protection
+            val cmd = if (enabled)
+                "echo 85000 > /sys/class/thermal/thermal_zone0/trip_point_0_temp 2>/dev/null || true"
+            else
+                "echo 75000 > /sys/class/thermal/thermal_zone0/trip_point_0_temp 2>/dev/null || true"
+            shizukuExec(cmd)
+            _optimizerState.value = _optimizerState.value.copy(thermalOverride = enabled)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting thermal override: ${e.message}")
+        }
     }
 
     fun setSuspendOemThrottler(enabled: Boolean) = viewModelScope.launch(Dispatchers.IO) {
-        shizukuExec(hardwareDetector.getOemThrottleCommand(enabled))
-        _optimizerState.value = _optimizerState.value.copy(suspendOemThrottler = enabled)
+        try {
+            shizukuExec(hardwareDetector.getOemThrottleCommand(enabled))
+            _optimizerState.value = _optimizerState.value.copy(suspendOemThrottler = enabled)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting OEM throttle: ${e.message}")
+        }
     }
 
     fun setAdaptiveLmk(enabled: Boolean) = viewModelScope.launch(Dispatchers.IO) {
-        if (enabled) shizukuExec(hardwareDetector.getLmkCommand())
-        _optimizerState.value = _optimizerState.value.copy(adaptiveLmk = enabled)
+        try {
+            if (enabled) shizukuExec(hardwareDetector.getLmkCommand())
+            _optimizerState.value = _optimizerState.value.copy(adaptiveLmk = enabled)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting LMK: ${e.message}")
+        }
     }
 
     fun setZramOptimize(enabled: Boolean) = viewModelScope.launch {
-        if (enabled) optimizer.configureZram()
-        _optimizerState.value = _optimizerState.value.copy(zramOptimize = enabled)
+        try {
+            if (enabled) optimizer.configureZram()
+            _optimizerState.value = _optimizerState.value.copy(zramOptimize = enabled)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting ZRAM: ${e.message}")
+        }
     }
 
     fun setBgFreeze(enabled: Boolean) = viewModelScope.launch {
-        optimizer.setBackgroundFreeze(enabled)
-        _optimizerState.value = _optimizerState.value.copy(bgFreeze = enabled)
+        try {
+            optimizer.setBackgroundFreeze(enabled)
+            _optimizerState.value = _optimizerState.value.copy(bgFreeze = enabled)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting background freeze: ${e.message}")
+        }
     }
 
     // ─── Defense Actions ─────────────────────────────────────
     fun triggerThreatScan() = viewModelScope.launch {
-        defense.runFullScan()
+        try {
+            defense.runFullScan()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error triggering threat scan: ${e.message}")
+        }
     }
 
     fun setAutoProtect(enabled: Boolean) {
-        _autoProtect.value = enabled
-        defense.setAutoProtect(enabled)
+        try {
+            _autoProtect.value = enabled
+            defense.setAutoProtect(enabled)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting auto-protect: ${e.message}")
+        }
     }
 
-    fun killThreat(threat: ThreatEvent) = defense.killThreat(threat)
+    fun killThreat(threat: ThreatEvent) {
+        try {
+            defense.killThreat(threat)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error killing threat: ${e.message}")
+        }
+    }
 
     // ─── Network Actions ─────────────────────────────────────
     fun toggleDnsSinkhole() {
-        val current = _networkState.value.dnsSinkhole
-        val action  = if (!current) DnsSinkholeService.ACTION_START else DnsSinkholeService.ACTION_STOP
-        app.startService(Intent(app, DnsSinkholeService::class.java).apply { this.action = action })
-        _networkState.value = _networkState.value.copy(dnsSinkhole = !current)
+        try {
+            val current = _networkState.value.dnsSinkhole
+            val action  = if (!current) DnsSinkholeService.ACTION_START else DnsSinkholeService.ACTION_STOP
+            app.startService(Intent(app, DnsSinkholeService::class.java).apply { this.action = action })
+            _networkState.value = _networkState.value.copy(dnsSinkhole = !current)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error toggling DNS sinkhole: ${e.message}")
+        }
     }
 
     fun setTcpLowLatency(enabled: Boolean) = viewModelScope.launch {
-        optimizer.setTcpLowLatency(enabled)
-        _networkState.value = _networkState.value.copy(tcpLowLatency = enabled)
+        try {
+            optimizer.setTcpLowLatency(enabled)
+            _networkState.value = _networkState.value.copy(tcpLowLatency = enabled)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting TCP low latency: ${e.message}")
+        }
     }
 
     fun setTelemetryBlocker(enabled: Boolean) {
-        _networkState.value = _networkState.value.copy(telemetryBlocked = enabled)
-        // Telemetry blocking xử lý trong DnsSinkholeService
+        try {
+            _networkState.value = _networkState.value.copy(telemetryBlocked = enabled)
+            // Telemetry blocking xử lý trong DnsSinkholeService
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting telemetry blocker: ${e.message}")
+        }
     }
 
     // ─── Audio Actions ────────────────────────────────────────
     fun playTrack(track: AudioTrack) {
-        val playlist = _audioState.value.playlist
-        audioEngine.play(track, playlist)
-        _audioState.value = _audioState.value.copy(
-            currentTrack = track.name,
-            genre        = track.genre,
-            isPlaying    = true
-        )
+        try {
+            val playlist = _audioState.value.playlist
+            audioEngine.play(track, playlist)
+            _audioState.value = _audioState.value.copy(
+                currentTrack = track.name,
+                genre        = track.genre,
+                isPlaying    = true
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error playing track: ${e.message}")
+        }
     }
 
     fun togglePlay() {
-        val playlist = _audioState.value.playlist
-        audioEngine.togglePlay(playlist)
-        _audioState.value = _audioState.value.copy(isPlaying = audioEngine.isPlaying.value)
+        try {
+            val playlist = _audioState.value.playlist
+            audioEngine.togglePlay(playlist)
+            _audioState.value = _audioState.value.copy(isPlaying = audioEngine.isPlaying.value)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error toggling play: ${e.message}")
+        }
     }
 
     fun nextTrack() {
-        val playlist = _audioState.value.playlist
-        audioEngine.playNext(playlist)
-        _audioState.value = _audioState.value.copy(
-            currentTrack = audioEngine.getCurrentTrackName(playlist),
-            genre        = audioEngine.getCurrentGenre(playlist),
-            isPlaying    = true
-        )
+        try {
+            val playlist = _audioState.value.playlist
+            audioEngine.playNext(playlist)
+            _audioState.value = _audioState.value.copy(
+                currentTrack = audioEngine.getCurrentTrackName(playlist),
+                genre        = audioEngine.getCurrentGenre(playlist),
+                isPlaying    = true
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error skipping to next track: ${e.message}")
+        }
     }
 
     fun prevTrack() {
-        val playlist = _audioState.value.playlist
-        audioEngine.playPrev(playlist)
-        _audioState.value = _audioState.value.copy(
-            currentTrack = audioEngine.getCurrentTrackName(playlist),
-            genre        = audioEngine.getCurrentGenre(playlist),
-            isPlaying    = true
-        )
+        try {
+            val playlist = _audioState.value.playlist
+            audioEngine.playPrev(playlist)
+            _audioState.value = _audioState.value.copy(
+                currentTrack = audioEngine.getCurrentTrackName(playlist),
+                genre        = audioEngine.getCurrentGenre(playlist),
+                isPlaying    = true
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error skipping to previous track: ${e.message}")
+        }
     }
 
     fun shuffleTracks() {
-        val playlist = _audioState.value.playlist
-        audioEngine.shuffle(playlist)
-        _audioState.value = _audioState.value.copy(
-            currentTrack = audioEngine.getCurrentTrackName(playlist),
-            genre        = audioEngine.getCurrentGenre(playlist),
-            isPlaying    = true
-        )
+        try {
+            val playlist = _audioState.value.playlist
+            audioEngine.shuffle(playlist)
+            _audioState.value = _audioState.value.copy(
+                currentTrack = audioEngine.getCurrentTrackName(playlist),
+                genre        = audioEngine.getCurrentGenre(playlist),
+                isPlaying    = true
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error shuffling tracks: ${e.message}")
+        }
     }
 
     // ─── Cleanup ─────────────────────────────────────────────
     override fun onCleared() {
         super.onCleared()
-        defense.destroy()
-        audioEngine.release()
-        Log.d(TAG, "ViewModel cleared")
+        try {
+            defense.destroy()
+            audioEngine.release()
+            Log.d(TAG, "ViewModel cleared")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during cleanup: ${e.message}")
+        }
     }
 }
