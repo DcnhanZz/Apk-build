@@ -13,13 +13,10 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "2.0-APEX"
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
-        externalNativeBuild { cmake { cppFlags("-std=c++17 -O3") } }
     }
 
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.8" }
-    externalNativeBuild { cmake { path("src/main/cpp/CMakeLists.txt") } }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
