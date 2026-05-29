@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.BloodDragon" parent="android:Theme.Material.NoTitleBar.Fullscreen"/>
+</resources>
