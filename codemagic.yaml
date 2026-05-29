@@ -1,13 +1,48 @@
 workflows:
   android-native-build:
-    name: Android Native Build
+    name: Blood Dragon Apex Native Build
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+
     environment:
-      android_sdk: default
-      java: 17
+      java: "17"                    # String, không phải số
+      # Android SDK được pre-install sẵn trên Codemagic — không cần khai báo
+      vars:
+        GRADLE_OPTS: "-Xmx4g -Dorg.gradle.daemon=false"
+
     scripts:
-      - name: Build file APK (Debug)
+      # Bước 1: Cài NDK (bắt buộc cho project có C++/JNI)
+      - name: Install Android NDK
         script: |
-          gradle assembleDebug
+          echo "y" | sdkmanager \
+            "ndk;25.2.9519653" \
+            "cmake;3.22.1" \
+            --sdk_root=$ANDROID_SDK_ROOT
+
+      # Bước 2: Cấp quyền thực thi cho Gradle wrapper
+      - name: Set gradlew permissions
+        script: chmod +x gradlew
+
+      # Bước 3: Kiểm tra môi trường
+      - name: Check environment
+        script: |
+          echo "Java: $(java -version 2>&1 | head -1)"
+          echo "NDK: $ANDROID_NDK_HOME"
+          echo "SDK: $ANDROID_SDK_ROOT"
+          ./gradlew --version
+
+      # Bước 4: Build APK Debug
+      - name: Build APK Debug
+        script: ./gradlew assembleDebug --stacktrace
+
     artifacts:
-      - build/outputs/apk/**/*.apk
-      
+      - app/build/outputs/apk/debug/*.apk
+      - app/build/outputs/logs/*.txt
+
+    publishing:
+      email:
+        recipients:
+          - your@email.com
+        notify:
+          success: true
+          failure: true
